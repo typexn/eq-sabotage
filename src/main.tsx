@@ -50,6 +50,7 @@ interface GameState {
   candidates: TermCard[];
   selectedCard?: TermCard;
   selectedSign?: 1 | -1;
+  rootCandidates: number[];
   displayMode: 'normal' | 'deduction';
   logs: ActionLog[];
   lastResult?: string;
@@ -63,6 +64,21 @@ const CHANNEL_NAME = 'equation-sabotage-channel';
 const VERSION_LABEL: Record<GameVersion, string> = {
   grade1: '1학년 버전',
   grade3: '3학년 버전',
+};
+
+const DEFAULT_SETTINGS: Record<GameVersion, Pick<GameState, 'playerCount' | 'targetScore' | 'rounds' | 'sabotageCount'>> = {
+  grade1: {
+    playerCount: 22,
+    targetScore: 10,
+    rounds: 3,
+    sabotageCount: 3,
+  },
+  grade3: {
+    playerCount: 28,
+    targetScore: 10,
+    rounds: 2,
+    sabotageCount: 4,
+  },
 };
 
 const CARD_POOL: Record<GameVersion, Omit<TermCard, 'id'>[]> = {
@@ -96,28 +112,38 @@ function drawCards(version: GameVersion) {
   return shuffle(CARD_POOL[version]).slice(0, 3).map((card) => ({ ...card, id: uid('card') }));
 }
 
+function drawRootCandidates(sign: 1 | -1) {
+  return shuffle([1, 2, 3, 4, 5]).slice(0, 3).map((value) => value * sign).sort((a, b) => a - b);
+}
+
 function pickSabotages(playerCount: number, sabotageCount: number) {
   return shuffle(Array.from({ length: playerCount }, (_, index) => index + 1)).slice(0, sabotageCount).sort((a, b) => a - b);
 }
 
 function defaultPlayerCount(version: GameVersion) {
-  return version === 'grade1' ? 22 : 28;
+  return DEFAULT_SETTINGS[version].playerCount;
 }
 
 function defaultRounds(version: GameVersion) {
-  return version === 'grade1' ? 3 : 2;
+  return DEFAULT_SETTINGS[version].rounds;
 }
 
-function getSabotageCount(playerCount: number) {
-  if (playerCount <= 15) return 2;
-  if (playerCount <= 23) return 3;
-  return 4;
+function defaultTargetScore(version: GameVersion) {
+  return DEFAULT_SETTINGS[version].targetScore;
 }
 
-function createGame(version: GameVersion, playerCount = defaultPlayerCount(version), gameStage: GameStage = 'setup', targetScore = 10): GameState {
-  const rounds = defaultRounds(version);
-  const sabotageCount = getSabotageCount(playerCount);
+function defaultSabotageCount(version: GameVersion) {
+  return DEFAULT_SETTINGS[version].sabotageCount;
+}
 
+function createGame(
+  version: GameVersion,
+  playerCount = defaultPlayerCount(version),
+  gameStage: GameStage = 'setup',
+  targetScore = defaultTargetScore(version),
+  rounds = defaultRounds(version),
+  sabotageCount = defaultSabotageCount(version),
+): GameState {
   return {
     version,
     gameStage,
@@ -134,6 +160,7 @@ function createGame(version: GameVersion, playerCount = defaultPlayerCount(versi
     right: [],
     phase: 'idle',
     candidates: [],
+    rootCandidates: [],
     displayMode: 'normal',
     logs: [],
     updatedAt: Date.now(),
@@ -192,13 +219,15 @@ function normalizeStoredState(value: unknown): GameState | null {
   const candidate = value as Partial<GameState>;
   if (!isGameVersion(candidate.version)) return null;
 
-  const defaults = candidate.version === 'grade1'
-    ? { playerCount: 22, rounds: 3 }
-    : { playerCount: 28, rounds: 2 };
+  const defaults = DEFAULT_SETTINGS[candidate.version];
   const playerCount = Math.max(1, Math.floor(numberOr(candidate.playerCount, defaults.playerCount)));
-  const rounds = Math.max(1, Math.floor(numberOr(candidate.rounds, defaults.rounds)));
+  const rounds = Math.min(5, Math.max(1, Math.floor(numberOr(candidate.rounds, defaults.rounds))));
   const gameStage = isGameStage(candidate.gameStage) ? candidate.gameStage : 'playing';
-  const sabotageCount = Math.max(0, Math.floor(numberOr(candidate.sabotageCount, getSabotageCount(playerCount))));
+  const fallbackSabotageCount = Math.min(defaults.sabotageCount, Math.max(1, playerCount - 1));
+  const sabotageCount = Math.min(
+    Math.max(1, playerCount - 1),
+    Math.max(1, Math.floor(numberOr(candidate.sabotageCount, fallbackSabotageCount))),
+  );
   const sabotages = numberArrayOr(candidate.sabotages)
     .filter((player) => player >= 1 && player <= playerCount)
     .slice(0, sabotageCount);
@@ -227,6 +256,7 @@ function normalizeStoredState(value: unknown): GameState | null {
     candidates: cardArrayOr(candidate.candidates),
     selectedCard: cardArrayOr(candidate.selectedCard ? [candidate.selectedCard] : [])[0],
     selectedSign: candidate.selectedSign === 1 || candidate.selectedSign === -1 ? candidate.selectedSign : undefined,
+    rootCandidates: numberArrayOr(candidate.rootCandidates).filter((root) => root >= -5 && root <= 5 && root !== 0),
     displayMode: isDisplayMode(candidate.displayMode) ? candidate.displayMode : 'normal',
     logs: Array.isArray(candidate.logs) ? candidate.logs.filter((log): log is ActionLog => Boolean(log && typeof log === 'object')) : [],
     lastResult: typeof candidate.lastResult === 'string' ? candidate.lastResult : undefined,
@@ -379,6 +409,7 @@ function advanceTurn(state: GameState): GameState {
     candidates: [],
     selectedCard: undefined,
     selectedSign: undefined,
+    rootCandidates: [],
     displayMode: 'normal',
   };
 
@@ -433,7 +464,96 @@ function StatCard({ label, value, accent = false }: { label: string; value: stri
   );
 }
 
+const HELP_STEPS = [
+  {
+    title: '1단계: 게임 목표',
+    items: [
+      '일반 플레이어는 방정식의 근을 찾아 승점을 얻는다.',
+      '사보타지는 정체를 숨긴 채 근을 찾기 어렵게 만든다.',
+    ],
+  },
+  {
+    title: '2단계: 게임 설정',
+    items: [
+      '학년 버전을 선택한다.',
+      '실제 참여 학생 수와 목표 승점을 입력한다.',
+      '사보타지 배정 확인 화면에서 교사가 사보타지 번호를 확인한다.',
+      '게임 시작 후에는 사보타지 전체 번호가 공개되지 않는다.',
+    ],
+  },
+  {
+    title: '3단계: 카드 추가하기',
+    items: [
+      '카드 3장 중 1장을 골라 좌변 또는 우변에 추가한다.',
+      '학생들은 근이 제시 가능한 범위에 들어오도록 식을 조정한다.',
+    ],
+  },
+  {
+    title: '4단계: 근 제시하기',
+    items: [
+      '좌변과 우변에 카드가 각각 1장 이상 있고, 전체 카드가 4장 이상일 때만 가능하다.',
+      '양수 또는 음수를 고른 뒤 1~5 중 하나를 선택한다.',
+      'x=0은 선택할 수 없다.',
+      '맞히면 +2점, 틀리면 -1점이며, 이후 식은 초기화된다.',
+    ],
+  },
+  {
+    title: '5단계: 화면 공유 및 추리하기',
+    items: [
+      '현재까지의 행동 기록을 HDMI 화면에 공개한다.',
+      '사보타지로 의심되는 번호를 지목할 수 있다.',
+      '맞히면 해당 사보타지는 이후 행동할 수 없다.',
+      '지목 자체는 승점에 영향을 주지 않는다.',
+    ],
+  },
+  {
+    title: '6단계: 승리 조건',
+    items: [
+      '모든 턴이 끝났을 때 승점이 목표 승점 이상이면 일반 플레이어 승리.',
+      '목표 승점 미만이면 사보타지 승리.',
+    ],
+  },
+];
+
+function HelpModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+      <section
+        className="help-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="help-modal-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="help-modal-header">
+          <div>
+            <p className="eyebrow">교사용 도움말</p>
+            <h2 id="help-modal-title">게임 방법</h2>
+          </div>
+          <button type="button" className="modal-close-button" aria-label="도움말 닫기" onClick={onClose}>
+            닫기
+          </button>
+        </div>
+        <div className="help-step-list">
+          {HELP_STEPS.map((step) => (
+            <article className="help-step" key={step.title}>
+              <h3>{step.title}</h3>
+              <ul>
+                {step.items.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function StartScreen({ onStart }: { onStart: (version: GameVersion) => void }) {
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+
   return (
     <main className="page start-page">
       <div className="app-shell start-shell">
@@ -442,18 +562,20 @@ function StartScreen({ onStart }: { onStart: (version: GameVersion) => void }) {
         <div className="version-grid" aria-label="버전 선택">
           <button type="button" className="version-button" onClick={() => onStart('grade1')}>
             <span>1학년 버전</span>
-            <small>22명, 3바퀴, 사보타지 3명</small>
+            <small>일차방정식</small>
           </button>
           <button type="button" className="version-button" onClick={() => onStart('grade3')}>
             <span>3학년 버전</span>
-            <small>28명, 2바퀴, 사보타지 4명</small>
+            <small>이차방정식</small>
           </button>
         </div>
         <nav className="screen-links" aria-label="화면 이동">
+          <button type="button" className="link-button" onClick={() => setIsHelpOpen(true)}>게임 방법 보기</button>
           <a href="/teacher">교사용 화면</a>
           <a href="/display">HDMI 화면</a>
         </nav>
       </div>
+      {isHelpOpen && <HelpModal onClose={() => setIsHelpOpen(false)} />}
     </main>
   );
 }
@@ -461,15 +583,22 @@ function StartScreen({ onStart }: { onStart: (version: GameVersion) => void }) {
 function PlayerSetupScreen({ state, updateState }: { state: GameState; updateState: ReturnType<typeof useSharedGameState>[1] }) {
   const [playerCount, setPlayerCount] = useState(String(state.playerCount));
   const [targetScore, setTargetScore] = useState(String(state.targetScore));
+  const [rounds, setRounds] = useState(String(state.rounds));
+  const [sabotageCount, setSabotageCount] = useState(String(state.sabotageCount));
   const parsedCount = Number(playerCount);
   const parsedTargetScore = Number(targetScore);
+  const parsedRounds = Number(rounds);
+  const parsedSabotageCount = Number(sabotageCount);
+  const recommended = DEFAULT_SETTINGS[state.version];
   const isPlayerCountValid = Number.isInteger(parsedCount) && parsedCount >= 5 && parsedCount <= 40;
   const isTargetScoreValid = Number.isInteger(parsedTargetScore) && parsedTargetScore >= 1;
-  const isValid = isPlayerCountValid && isTargetScoreValid;
+  const isRoundsValid = Number.isInteger(parsedRounds) && parsedRounds >= 1 && parsedRounds <= 5;
+  const isSabotageCountValid = Number.isInteger(parsedSabotageCount) && parsedSabotageCount >= 1 && parsedSabotageCount < parsedCount;
+  const isValid = isPlayerCountValid && isTargetScoreValid && isRoundsValid && isSabotageCountValid;
 
   const goToConfirm = () => {
     if (!isValid) return;
-    updateState(() => createGame(state.version, parsedCount, 'confirm', parsedTargetScore));
+    updateState(() => createGame(state.version, parsedCount, 'confirm', parsedTargetScore, parsedRounds, parsedSabotageCount));
   };
 
   return (
@@ -478,28 +607,52 @@ function PlayerSetupScreen({ state, updateState }: { state: GameState; updateSta
         <p className="eyebrow">게임 설정</p>
         <h1>{VERSION_LABEL[state.version]}</h1>
         <section className="control-panel setup-card">
-          <label className="target-input player-count-input">
-            플레이어 수
-            <input
-              type="number"
-              min="5"
-              max="40"
-              value={playerCount}
-              onChange={(event) => setPlayerCount(event.target.value)}
-            />
-          </label>
-          <label className="target-input player-count-input">
-            목표 승점
-            <input
-              type="number"
-              min="1"
-              value={targetScore}
-              onChange={(event) => setTargetScore(event.target.value)}
-            />
-          </label>
-          <p className="muted">{state.version === 'grade1' ? '1학년은 3바퀴로 진행합니다.' : '3학년은 2바퀴로 진행합니다.'}</p>
+          <div className="setup-input-grid">
+            <label className="target-input player-count-input">
+              플레이어 수
+              <input
+                type="number"
+                min="5"
+                max="40"
+                value={playerCount}
+                onChange={(event) => setPlayerCount(event.target.value)}
+              />
+            </label>
+            <label className="target-input player-count-input">
+              목표 승점
+              <input
+                type="number"
+                min="1"
+                value={targetScore}
+                onChange={(event) => setTargetScore(event.target.value)}
+              />
+            </label>
+            <label className="target-input player-count-input">
+              바퀴 수
+              <input
+                type="number"
+                min="1"
+                max="5"
+                value={rounds}
+                onChange={(event) => setRounds(event.target.value)}
+              />
+            </label>
+            <label className="target-input player-count-input">
+              사보타지 수
+              <input
+                type="number"
+                min="1"
+                max="39"
+                value={sabotageCount}
+                onChange={(event) => setSabotageCount(event.target.value)}
+              />
+            </label>
+          </div>
+          <p className="muted">권장: {recommended.playerCount}명, {recommended.rounds}바퀴, 사보타지 {recommended.sabotageCount}명</p>
           {!isPlayerCountValid && <p className="setup-error">플레이어 수는 5명 이상 40명 이하로 입력하세요.</p>}
           {!isTargetScoreValid && <p className="setup-error">목표 승점은 1점 이상으로 입력하세요.</p>}
+          {!isRoundsValid && <p className="setup-error">바퀴 수는 1 이상 5 이하로 입력하세요.</p>}
+          {!isSabotageCountValid && <p className="setup-error">사보타지 수는 1명 이상이며 플레이어 수보다 작아야 합니다.</p>}
           <div className="action-row">
             <a href="/" onClick={() => updateState(() => null)}>시작 화면</a>
             <button type="button" disabled={!isValid} onClick={goToConfirm}>사보타지 배정 확인</button>
@@ -512,7 +665,9 @@ function PlayerSetupScreen({ state, updateState }: { state: GameState; updateSta
 
 function SabotageConfirmScreen({ state, updateState }: { state: GameState; updateState: ReturnType<typeof useSharedGameState>[1] }) {
   const reroll = () => {
-    updateState((current) => current ? createGame(current.version, current.playerCount, 'confirm', current.targetScore) : current);
+    updateState((current) => current
+      ? createGame(current.version, current.playerCount, 'confirm', current.targetScore, current.rounds, current.sabotageCount)
+      : current);
   };
 
   const startPlaying = () => {
@@ -562,19 +717,16 @@ function EmptyState() {
   );
 }
 
-function RootChoice({ sign, onSubmit }: { sign: 1 | -1; onSubmit: (root: number) => void }) {
+function RootChoice({ roots, onSubmit }: { roots: number[]; onSubmit: (root: number) => void }) {
   return (
     <div className="choice-block">
       <h3>근 선택</h3>
       <div className="card-row">
-        {[1, 2, 3, 4, 5].map((value) => {
-          const root = value * sign;
-          return (
-            <button type="button" className="math-card" key={root} onClick={() => onSubmit(root)}>
-              x={root}
-            </button>
-          );
-        })}
+        {roots.map((root) => (
+          <button type="button" className="math-card" key={root} onClick={() => onSubmit(root)}>
+            x={root}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -583,6 +735,7 @@ function RootChoice({ sign, onSubmit }: { sign: 1 | -1; onSubmit: (root: number)
 function TeacherScreen({ state, updateState }: { state: GameState | null; updateState: ReturnType<typeof useSharedGameState>[1] }) {
   const [now, setNow] = useState(Date.now());
   const [isRoleOpen, setIsRoleOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const timer = secondsLeft(state, now);
 
   useEffect(() => {
@@ -598,6 +751,19 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
     if (!state || state.phase === 'idle' || state.phase === 'ended' || !state.timerEnd || state.timerEnd > now) return;
     updateState((current) => {
       if (!current || current.phase === 'idle' || current.phase === 'ended' || !current.timerEnd || current.timerEnd > Date.now()) return current;
+      if (current.activeAction === 'root') {
+        const score = current.score - 1;
+        const timedOutRoot = appendLog({ ...current, score }, {
+          kind: 'timeout',
+          note: '근 제시 시간 초과: 오답 처리 (-1점)',
+        });
+        return advanceTurn({
+          ...timedOutRoot,
+          left: [],
+          right: [],
+          lastResult: '시간 초과로 근 제시에 실패했습니다. -1점, 식 초기화',
+        });
+      }
       const timedOut = appendLog(current, {
         kind: 'timeout',
         candidates: current.candidates.map((card) => card.label),
@@ -660,6 +826,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
           activeAction: 'root',
           timerEnd: Date.now() + 20_000,
           selectedSign: undefined,
+          rootCandidates: [],
           lastResult: undefined,
         }
       : current);
@@ -667,7 +834,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
 
   const chooseSign = (sign: 1 | -1) => {
     updateState((current) => current && current.phase === 'choosing-sign'
-      ? { ...current, phase: 'choosing-root', selectedSign: sign }
+      ? { ...current, phase: 'choosing-root', selectedSign: sign, rootCandidates: drawRootCandidates(sign) }
       : current);
   };
 
@@ -732,6 +899,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
             <h1>{VERSION_LABEL[state.version]}</h1>
           </div>
           <div className="header-actions">
+            <button type="button" className="link-button compact-help-button" onClick={() => setIsHelpOpen(true)}>도움말</button>
             <a href="/" onClick={() => updateState(() => null)}>시작 화면</a>
             <a href="/display">HDMI 화면</a>
           </div>
@@ -754,7 +922,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         <section className="teacher-grid">
           <div className="control-panel">
             <div className="panel-title">
-              <h2>교사용 조작</h2>
+              <h2>이번 차례 행동</h2>
               {timer !== null && <strong className="timer">{timer}초</strong>}
             </div>
             {state.phase === 'ended' ? (
@@ -801,7 +969,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
             )}
 
             {state.phase === 'choosing-root' && state.selectedSign && (
-              <RootChoice sign={state.selectedSign} onSubmit={submitRoot} />
+              <RootChoice roots={state.rootCandidates} onSubmit={submitRoot} />
             )}
 
             {state.phase === 'guessing' && (
@@ -845,6 +1013,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
           </aside>
         </section>
       </div>
+      {isHelpOpen && <HelpModal onClose={() => setIsHelpOpen(false)} />}
     </main>
   );
 }
@@ -868,6 +1037,41 @@ function LogList({ logs }: { logs: ActionLog[] }) {
         </article>
       ))}
     </div>
+  );
+}
+
+function summarizeDisplayLog(log: ActionLog) {
+  if (log.kind === 'card' && log.selectedCard && log.side) {
+    return `${log.player}번: '${log.selectedCard}'을 ${sideLabel(log.side)}에 추가`;
+  }
+  if (log.kind === 'root' && log.rootValue !== undefined) {
+    return `${log.player}번: x = ${log.rootValue} 제시`;
+  }
+  if (log.kind === 'deduction' && log.guessedPlayer !== undefined) {
+    return `${log.player}번: ${log.guessedPlayer}번을 사보타지로 지목`;
+  }
+  if (log.kind === 'timeout') {
+    if (log.note.includes('근 제시')) {
+      return `${log.player}번: 근 제시 시간 초과`;
+    }
+    return `${log.player}번: 시간 초과`;
+  }
+  return `${log.player}번: ${log.note}`;
+}
+
+function DisplayLogSummary({ logs }: { logs: ActionLog[] }) {
+  const recentLogs = logs.slice(-5);
+
+  if (recentLogs.length === 0) {
+    return <p className="display-log-empty">아직 공개할 행동 기록이 없습니다.</p>;
+  }
+
+  return (
+    <ol className="display-log-summary">
+      {recentLogs.map((log) => (
+        <li key={log.id}>{summarizeDisplayLog(log)}</li>
+      ))}
+    </ol>
   );
 }
 
@@ -930,8 +1134,8 @@ function DisplayScreen({ state }: { state: GameState | null }) {
         {state.phase === 'ended' && <div className="display-result">{state.lastResult}</div>}
         {state.displayMode === 'deduction' && (
           <section className="deduction-board">
-            <h2>행동 기록</h2>
-            <LogList logs={state.logs} />
+            <h2>최근 5개 행동</h2>
+            <DisplayLogSummary logs={state.logs} />
           </section>
         )}
       </div>
