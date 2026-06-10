@@ -588,6 +588,7 @@ h3 {
   max-width: 100%;
   overflow: hidden;
   border: 2px solid var(--line);
+  text-align: center;
 }
 
 .display-equation strong {
@@ -628,6 +629,15 @@ h3 {
   color: var(--ink);
   font-size: clamp(2rem, 5vw, 4rem);
   text-align: center;
+}
+
+.display-result p {
+  margin: 0;
+  line-height: 1.14;
+}
+
+.display-result p + p {
+  margin-top: 8px;
 }
 
 .display-recent-result {
