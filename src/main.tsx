@@ -4,7 +4,7 @@ import './styles.css';
 
 type GameVersion = 'grade1' | 'grade3';
 type GameStage = 'setup' | 'confirm' | 'playing';
-type Phase = 'idle' | 'choosing-card' | 'placing-card' | 'choosing-sign' | 'choosing-root' | 'guessing' | 'ended';
+type Phase = 'idle' | 'choosing-card' | 'placing-card' | 'choosing-sign' | 'choosing-root' | 'guessing' | 'result' | 'ended';
 type Side = 'left' | 'right';
 type ActionKind = 'card' | 'root' | 'deduction' | 'timeout';
 
@@ -28,6 +28,10 @@ interface ActionLog {
   guessedPlayer?: number;
   guessHit?: boolean;
   note: string;
+}
+
+interface ResultPrompt {
+  message: string;
 }
 
 interface GameState {
@@ -55,6 +59,7 @@ interface GameState {
   displayMode: 'normal' | 'deduction';
   logs: ActionLog[];
   lastResult?: string;
+  resultPrompt?: ResultPrompt;
   winner?: 'players' | 'sabotages';
   updatedAt: number;
 }
@@ -185,6 +190,7 @@ function isPhase(value: unknown): value is Phase {
     || value === 'choosing-sign'
     || value === 'choosing-root'
     || value === 'guessing'
+    || value === 'result'
     || value === 'ended'
   );
 }
@@ -265,6 +271,9 @@ function normalizeStoredState(value: unknown): GameState | null {
     displayMode: isDisplayMode(candidate.displayMode) ? candidate.displayMode : 'normal',
     logs: Array.isArray(candidate.logs) ? candidate.logs.filter((log): log is ActionLog => Boolean(log && typeof log === 'object')) : [],
     lastResult: typeof candidate.lastResult === 'string' ? candidate.lastResult : undefined,
+    resultPrompt: candidate.resultPrompt && typeof candidate.resultPrompt.message === 'string'
+      ? { message: candidate.resultPrompt.message }
+      : undefined,
     winner: candidate.winner === 'players' || candidate.winner === 'sabotages' ? candidate.winner : undefined,
     updatedAt: numberOr(candidate.updatedAt, Date.now()),
   };
@@ -420,6 +429,7 @@ function finishIfNeeded(state: GameState): GameState {
       activeAction: undefined,
       timerEnd: undefined,
       displayMode: 'normal',
+      resultPrompt: undefined,
       winner: state.score >= state.targetScore ? 'players' : 'sabotages',
       lastResult: state.score >= state.targetScore ? '분석관 팀 승리' : '첩자 승리',
     };
@@ -427,11 +437,9 @@ function finishIfNeeded(state: GameState): GameState {
   return state;
 }
 
-function advanceTurn(state: GameState): GameState {
-  let next: GameState = {
+function clearActionState(state: GameState): GameState {
+  return {
     ...state,
-    completedTurns: state.completedTurns + 1,
-    currentPlayer: state.currentPlayer === state.playerCount ? 1 : state.currentPlayer + 1,
     phase: 'idle',
     activeAction: undefined,
     timerEnd: undefined,
@@ -440,18 +448,40 @@ function advanceTurn(state: GameState): GameState {
     selectedSign: undefined,
     rootCandidates: [],
     displayMode: 'normal',
+    resultPrompt: undefined,
   };
+}
 
-  while (
+function waitForResultConfirm(state: GameState, message: string): GameState {
+  return {
+    ...state,
+    phase: 'result',
+    activeAction: undefined,
+    timerEnd: undefined,
+    candidates: [],
+    selectedCard: undefined,
+    selectedSign: undefined,
+    rootCandidates: [],
+    resultPrompt: { message },
+    lastResult: message,
+  };
+}
+
+function advanceTurn(state: GameState): GameState {
+  const next: GameState = clearActionState({
+    ...state,
+    completedTurns: state.completedTurns + 1,
+    currentPlayer: state.currentPlayer === state.playerCount ? 1 : state.currentPlayer + 1,
+  });
+
+  if (
     next.completedTurns < totalTurns(next)
     && next.caughtSabotages.includes(next.currentPlayer)
   ) {
-    next = {
-      ...next,
-      completedTurns: next.completedTurns + 1,
-      currentPlayer: next.currentPlayer === next.playerCount ? 1 : next.currentPlayer + 1,
-      lastResult: `${next.currentPlayer}번은 검거된 첩자라 차례를 건너뜁니다.`,
-    };
+    return waitForResultConfirm(
+      next,
+      `${next.currentPlayer}번은 검거된 첩자이므로 행동할 수 없습니다.\n차례를 넘깁니다.`,
+    );
   }
 
   return finishIfNeeded(next);
@@ -957,6 +987,30 @@ function RootChoice({ roots, onSubmit }: { roots: number[]; onSubmit: (root: num
   );
 }
 
+function ResultConfirmModal({ message, onConfirm }: { message: string; onConfirm: () => void }) {
+  return (
+    <div className="modal-backdrop result-modal-backdrop" role="presentation">
+      <section
+        className="result-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="result-modal-title"
+      >
+        <p className="eyebrow">행동 결과</p>
+        <h2 id="result-modal-title">결과 확인</h2>
+        <div className="result-modal-message">
+          {message.split('\n').map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+        <button type="button" className="result-confirm-button" onClick={onConfirm}>
+          확인
+        </button>
+      </section>
+    </div>
+  );
+}
+
 function TeacherScreen({ state, updateState }: { state: GameState | null; updateState: ReturnType<typeof useSharedGameState>[1] }) {
   const [now, setNow] = useState(Date.now());
   const [isRoleOpen, setIsRoleOpen] = useState(false);
@@ -973,29 +1027,38 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
   }, [state?.currentPlayer]);
 
   useEffect(() => {
-    if (!state || state.phase === 'idle' || state.phase === 'ended' || !state.timerEnd || state.timerEnd > now) return;
+    if (!state || state.phase === 'idle' || state.phase === 'result' || state.phase === 'ended' || !state.timerEnd || state.timerEnd > now) return;
     updateState((current) => {
-      if (!current || current.phase === 'idle' || current.phase === 'ended' || !current.timerEnd || current.timerEnd > Date.now()) return current;
+      if (!current || current.phase === 'idle' || current.phase === 'result' || current.phase === 'ended' || !current.timerEnd || current.timerEnd > Date.now()) return current;
       if (current.activeAction === 'root') {
         const score = current.score - 1;
+        const message = '근 제시 시간이 초과되었습니다.\n정보를 1건 유실했습니다.\n현재 식은 초기화됩니다.';
         const timedOutRoot = appendLog({ ...current, score }, {
           kind: 'timeout',
           note: '근 제시 시간 초과. 정보를 1건 유실했습니다.',
         });
-        return advanceTurn({
+        return waitForResultConfirm({
           ...timedOutRoot,
           left: [],
           right: [],
-          lastResult: '근 제시 시간 초과. 정보를 1건 유실했습니다.',
-        });
+        }, message);
       }
+      if (current.activeAction === 'deduction') {
+        const message = '작전 회의 시간이 초과되었습니다.\n아무 변화 없이 진행합니다.';
+        const timedOutDeduction = appendLog(current, {
+          kind: 'timeout',
+          note: '작전 회의 시간 초과',
+        });
+        return waitForResultConfirm(timedOutDeduction, message);
+      }
+      const message = '시간이 초과되었습니다.\n아무 행동 없이 턴을 종료합니다.';
       const timedOut = appendLog(current, {
         kind: 'timeout',
         candidates: current.candidates.map((card) => card.label),
         selectedCard: current.selectedCard?.label,
         note: '제한 시간 초과로 행동 없이 턴 종료',
       });
-      return advanceTurn({ ...timedOut, lastResult: '제한 시간 초과' });
+      return waitForResultConfirm(timedOut, message);
     });
   }, [now, state, updateState]);
 
@@ -1039,7 +1102,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         side,
         note: `${selected.label} 카드를 ${sideLabel(side)}에 추가`,
       });
-      return advanceTurn({ ...logged, lastResult: `${selected.label} 카드 추가 완료` });
+      return waitForResultConfirm(logged, `${sideLabel(side)}에 '${selected.label}'를 추가했습니다.`);
     });
   };
 
@@ -1074,14 +1137,14 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         success,
         note: `x=${root} 제시 ${success ? '성공' : '실패'}`,
       });
-      return advanceTurn({
+      const message = success
+        ? '암호 키 입력 성공!\n정보를 2건 획득했습니다.\n현재 식은 초기화됩니다.'
+        : '잘못된 암호 키입니다.\n정보를 1건 유실했습니다.\n현재 식은 초기화됩니다.';
+      return waitForResultConfirm({
         ...logged,
         left: [],
         right: [],
-        lastResult: success
-          ? '암호 키 입력 성공! 정보를 2건 획득했습니다.'
-          : '잘못된 암호 키입니다. 정보를 1건 유실했습니다.',
-      });
+      }, message);
     });
   };
 
@@ -1110,7 +1173,17 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         guessHit: hit,
         note: `${player}번 지목 ${hit ? '성공' : '실패'}`,
       });
-      return advanceTurn({ ...logged, lastResult: `${player}번 지목 ${hit ? '성공' : '실패'}` });
+      const message = hit
+        ? `첩자를 찾아냈습니다!\n${player}번은 이후 행동할 수 없습니다.`
+        : '지목에 실패했습니다.\n아무 변화 없이 진행합니다.';
+      return waitForResultConfirm(logged, message);
+    });
+  };
+
+  const confirmResult = () => {
+    updateState((current) => {
+      if (!current || current.phase !== 'result' || !current.resultPrompt) return current;
+      return advanceTurn(current);
     });
   };
 
@@ -1248,6 +1321,9 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         </section>
       </div>
       {isHelpOpen && <HelpModal onClose={() => setIsHelpOpen(false)} />}
+      {state.resultPrompt && (
+        <ResultConfirmModal message={state.resultPrompt.message} onConfirm={confirmResult} />
+      )}
     </main>
   );
 }
@@ -1366,6 +1442,13 @@ function DisplayScreen({ state }: { state: GameState | null }) {
           <StatCard label="남은 첩자 수" value={`${remainingSabotages(state)}명`} accent />
         </div>
         <p className="display-meeting-status">{deductionStatusLabel(state)}</p>
+        {state.phase !== 'ended' && state.lastResult && (
+          <div className="display-recent-result">
+            {state.lastResult.split('\n').map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </div>
+        )}
         {state.phase === 'ended' && <div className="display-result">{state.lastResult}</div>}
         {state.displayMode === 'deduction' && (
           <section className="deduction-board">

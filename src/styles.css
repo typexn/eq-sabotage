@@ -557,6 +557,10 @@ h3 {
   box-shadow: var(--shadow);
 }
 
+.last-result {
+  white-space: pre-line;
+}
+
 .meeting-status {
   margin: 12px 0 0;
   color: var(--muted-ink);
@@ -624,6 +628,26 @@ h3 {
   color: var(--ink);
   font-size: clamp(2rem, 5vw, 4rem);
   text-align: center;
+}
+
+.display-recent-result {
+  display: grid;
+  gap: 4px;
+  margin-top: 16px;
+  padding: 18px 22px;
+  border: 2px solid #8a681a;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #e2bd55, var(--gold));
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+.display-recent-result p {
+  margin: 0;
+  font-size: clamp(1.35rem, 2.8vw, 2.35rem);
+  font-weight: 900;
+  line-height: 1.2;
 }
 
 .deduction-board {
@@ -698,6 +722,49 @@ h3 {
   place-items: center;
   padding: 24px;
   background: rgba(3, 8, 13, 0.72);
+}
+
+.result-modal {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 560px);
+  padding: 28px;
+  border: 2px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--hard-shadow);
+}
+
+.result-modal h2 {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vw, 2.8rem);
+}
+
+.result-modal-message {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--panel-warm);
+}
+
+.result-modal-message p {
+  margin: 0;
+  font-size: clamp(1.15rem, 2.4vw, 1.55rem);
+  font-weight: 900;
+  line-height: 1.35;
+  word-break: keep-all;
+}
+
+.result-confirm-button {
+  min-height: 54px;
+  padding: 0 28px;
+  justify-self: end;
+  border-color: #8a681a;
+  background: linear-gradient(180deg, #e2bd55, var(--gold));
+  font-size: 1.15rem;
 }
 
 .help-modal {
