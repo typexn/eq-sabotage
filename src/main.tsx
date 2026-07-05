@@ -7,6 +7,8 @@ type GameStage = 'setup' | 'confirm' | 'playing';
 type Phase = 'idle' | 'choosing-card' | 'placing-card' | 'choosing-sign' | 'choosing-root' | 'guessing' | 'result' | 'ended';
 type Side = 'left' | 'right';
 type ActionKind = 'card' | 'root' | 'deduction' | 'timeout';
+type Winner = 'players' | 'sabotages';
+type WinReason = 'target' | 'caught-all' | 'sabotages';
 
 interface TermCard {
   id: string;
@@ -62,7 +64,8 @@ interface GameState {
   lastResult?: string;
   lastDisplayResult?: string;
   resultPrompt?: ResultPrompt;
-  winner?: 'players' | 'sabotages';
+  winner?: Winner;
+  winReason?: WinReason;
   updatedAt: number;
 }
 
@@ -201,6 +204,10 @@ function isDisplayMode(value: unknown): value is GameState['displayMode'] {
   return value === 'normal' || value === 'deduction';
 }
 
+function isWinReason(value: unknown): value is WinReason {
+  return value === 'target' || value === 'caught-all' || value === 'sabotages';
+}
+
 function numberOr(value: unknown, fallback: number) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -283,6 +290,7 @@ function normalizeStoredState(value: unknown): GameState | null {
         }
       : undefined,
     winner: candidate.winner === 'players' || candidate.winner === 'sabotages' ? candidate.winner : undefined,
+    winReason: isWinReason(candidate.winReason) ? candidate.winReason : undefined,
     updatedAt: numberOr(candidate.updatedAt, Date.now()),
   };
 }
@@ -437,23 +445,79 @@ function sabotageRevealText(state: GameState) {
     .join(', ');
 }
 
-function finalResultMessages(state: GameState, winner: 'players' | 'sabotages') {
+function sortedPlayerText(players: number[]) {
+  if (players.length === 0) return '없음';
+  return players
+    .slice()
+    .sort((a, b) => a - b)
+    .map((player) => `${player}번`)
+    .join(', ');
+}
+
+function finalRevealLines(state: GameState) {
   const reveal = sabotageRevealText(state);
-  if (winner === 'players') {
+  const caught = sortedPlayerText(state.caughtSabotages.filter((player) => state.sabotages.includes(player)));
+  const hidden = sortedPlayerText(state.sabotages.filter((player) => !state.caughtSabotages.includes(player)));
+  return [
+    `첩자 공개: ${reveal}`,
+    `검거된 첩자: ${caught}`,
+    `끝까지 숨어 있던 첩자: ${hidden}`,
+  ];
+}
+
+function finalResultMessages(state: GameState, reason: WinReason) {
+  const revealLines = finalRevealLines(state);
+  if (reason === 'target') {
     return {
-      teacher: `목표 정보를 모두 확보했습니다!\n프로젝트 B 해독 성공!\n분석관 팀 승리입니다.\n\n첩자 번호: ${reveal}`,
-      display: `프로젝트 B 해독 성공\n분석관 팀 승리\n첩자 공개: ${reveal}`,
+      teacher: [
+        '목표 정보를 모두 확보했습니다!',
+        '프로젝트 B 해독 성공!',
+        '분석관 팀 승리입니다.',
+        '',
+        ...revealLines,
+      ].join('\n'),
+      display: [
+        '목표 정보 확보',
+        '분석관 팀 승리',
+        ...revealLines,
+      ].join('\n'),
+    };
+  }
+  if (reason === 'caught-all') {
+    return {
+      teacher: [
+        '모든 첩자를 찾아냈습니다!',
+        '프로젝트 B 작전 성공!',
+        '분석관 팀 승리입니다.',
+        '',
+        ...revealLines,
+      ].join('\n'),
+      display: [
+        '첩자 전원 검거',
+        '분석관 팀 승리',
+        ...revealLines,
+      ].join('\n'),
     };
   }
   return {
-    teacher: `목표 정보 확보에 실패했습니다.\n첩자 팀 승리입니다.\n\n첩자 번호: ${reveal}`,
-    display: `목표 정보 확보 실패\n첩자 팀 승리\n첩자 공개: ${reveal}`,
+    teacher: [
+      '목표 정보 확보에 실패했습니다.',
+      '첩자를 모두 검거하지 못했습니다.',
+      '첩자 팀 승리입니다.',
+      '',
+      ...revealLines,
+    ].join('\n'),
+    display: [
+      '작전 실패',
+      '첩자 팀 승리',
+      ...revealLines,
+    ].join('\n'),
   };
 }
 
 function finishIfNeeded(state: GameState): GameState {
-  if (state.winner) {
-    const messages = finalResultMessages(state, state.winner);
+  if (state.winner && state.winReason) {
+    const messages = finalResultMessages(state, state.winReason);
     return {
       ...state,
       phase: 'ended',
@@ -467,10 +531,20 @@ function finishIfNeeded(state: GameState): GameState {
   }
 
   if (state.score >= state.targetScore) {
-    const messages = finalResultMessages(state, 'players');
+    const messages = finalResultMessages(state, 'target');
     return waitForResultConfirm({
       ...state,
       winner: 'players',
+      winReason: 'target',
+    }, messages.teacher, messages.display);
+  }
+
+  if (caughtSabotageCount(state) >= state.sabotageCount) {
+    const messages = finalResultMessages(state, 'caught-all');
+    return waitForResultConfirm({
+      ...state,
+      winner: 'players',
+      winReason: 'caught-all',
     }, messages.teacher, messages.display);
   }
 
@@ -479,6 +553,7 @@ function finishIfNeeded(state: GameState): GameState {
     return waitForResultConfirm({
       ...state,
       winner: 'sabotages',
+      winReason: 'sabotages',
     }, messages.teacher, messages.display);
   }
   return state;
@@ -554,8 +629,12 @@ function canOfferRoot(state: GameState) {
   return state.left.length > 0 && state.right.length > 0 && state.left.length + state.right.length >= 4;
 }
 
+function caughtSabotageCount(state: GameState) {
+  return state.sabotages.filter((player) => state.caughtSabotages.includes(player)).length;
+}
+
 function remainingSabotages(state: GameState) {
-  return state.sabotageCount - state.caughtSabotages.length;
+  return state.sabotageCount - caughtSabotageCount(state);
 }
 
 function secondsLeft(state: GameState | null, now: number) {
@@ -619,8 +698,8 @@ const HELP_STEPS = [
   {
     title: '6단계: 승리 조건',
     items: [
-      '현재 획득한 정보가 목표 정보에 도달하면 즉시 분석관 팀이 승리한다.',
-      '전체 턴 종료 시까지 목표 정보에 도달하지 못하면 첩자 팀이 승리한다.',
+      '분석관 팀은 목표 정보에 도달하거나 모든 첩자를 찾아내면 승리한다.',
+      '전체 턴이 끝날 때까지 두 조건 중 하나도 달성하지 못하면 첩자 팀이 승리한다.',
     ],
   },
 ];
@@ -1198,7 +1277,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         : `${current.currentPlayer}번이 x = ${root}를 선택했지만 잘못된 암호 키입니다. 정보를 1건 유실했습니다.`;
       const reachedTarget = score >= current.targetScore;
       const victoryMessages = reachedTarget
-        ? finalResultMessages({ ...logged, left: [], right: [], winner: 'players' }, 'players')
+        ? finalResultMessages({ ...logged, left: [], right: [], winner: 'players', winReason: 'target' }, 'target')
         : null;
       const finalMessage = reachedTarget
         ? victoryMessages!.teacher
@@ -1211,6 +1290,7 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
         left: [],
         right: [],
         winner: reachedTarget ? 'players' : current.winner,
+        winReason: reachedTarget ? 'target' : current.winReason,
       }, finalMessage, finalDisplayMessage);
     });
   };
@@ -1247,7 +1327,15 @@ function TeacherScreen({ state, updateState }: { state: GameState | null; update
       const displayMessage = hit
         ? `${current.currentPlayer}번이 ${player}번을 첩자로 지목해 찾아냈습니다.`
         : `${current.currentPlayer}번이 ${player}번을 첩자로 지목했지만 실패했습니다.`;
-      return waitForResultConfirm(logged, message, displayMessage);
+      const caughtAll = hit && caughtSabotageCount({ ...current, caughtSabotages }) >= current.sabotageCount;
+      const victoryMessages = caughtAll
+        ? finalResultMessages({ ...logged, winner: 'players', winReason: 'caught-all' }, 'caught-all')
+        : null;
+      return waitForResultConfirm({
+        ...logged,
+        winner: caughtAll ? 'players' : current.winner,
+        winReason: caughtAll ? 'caught-all' : current.winReason,
+      }, victoryMessages ? victoryMessages.teacher : message, victoryMessages ? victoryMessages.display : displayMessage);
     });
   };
 
